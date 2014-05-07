@@ -1,0 +1,1265 @@
+#!/usr/bin/php
+<?php
+
+//-----------------------------------------------------------------------------
+// zimslabim
+// 
+// Zimbra to Sql/Ldap Address Book Importer
+//
+// 2014 Christof Lauber
+//-----------------------------------------------------------------------------
+
+$version="00.01";
+
+/**
+ * Abstract class that parses Zimbra Contacts XML to add them
+ * to a Database or a LDAP Directory
+ * @author c7
+ */
+abstract class zAddressImporter
+{
+	/** contains current zimbra address attributes */
+	protected $addressAttributes=array();
+	/** statistic varibles */
+	protected $updateCnt,$newCnt,$delCnt,$processedCnt;
+	
+	public function __construct()
+	{
+		$this->initAddressAttributes();
+	}
+
+	/**
+	 * Sets the current address book to use. Used to manage multiple addressbooks inside Database or Directory
+	 * @param string $abookUrl The Zimbra address book export url.
+	 * @param string $abookName Human readable name for the address book
+	 */
+	protected abstract function setAbook($abookUrl,$abookName);
+	
+	/**
+	 * Process one address entry to add or update it to db/ldap. This will be called for each found address in
+	 * export XML. The funtion itself needs to add or update the entry in db/ldap.
+	 * @param string $zid Id from zimbra export,used as foreign key
+	 * @param string $fileAsStr String that is show in Zimbra Contacs list for one entry
+	 * @param string $rev Zimbra revision of that address entry
+	 * @param string $lastchange Unix timestamp of last change in Zimbra
+	 * @param array $addressAttributes Array containing all Zimbra address attributes.
+	 * 									Keys are attibute names from docs/abook.txt in Zimbra installation.
+	 * @return	int If entry is added or updated return 1. 0 otherwise.
+	 */
+	protected abstract function updateAddAddrEntry($zid, $fileAsStr, $rev, $lastchange,$addressAttributes);
+	
+	/**
+	 * @return Array containing all currently existing zids in db/ldap for current abook.
+	 * This will be used to find entries that
+	 * do no longer exist in XML export anf thus need to be deleted.
+	 */
+	protected abstract function getZidsFromAbook();
+	
+	/**
+	 * @return array containg names of address books
+	 */
+	public abstract function getAbookList();
+	
+	/**
+	 * Delete a address book and all its entries
+	 * @param string $abookName name of address book to delete
+	 */
+	public abstract function deleteAbook($abookName);
+	
+	/**
+	 * Delete entry referenced by zid from db/ldap
+	 * @param unknown $zid
+	 */
+	protected abstract function deleteAddrEntry($zid);
+	
+	/**
+	 * Helper that initalizes the addressAttibute array with the address attribute keys.
+	 */
+	private function initAddressAttributes()
+	{
+		// attributes of an zaddress entry, attribute keys matches database col name
+		$this->addressAttributes["assistantPhone"]="";
+		$this->addressAttributes["callbackPhone"]="";
+		$this->addressAttributes["carPhone"]="";
+		$this->addressAttributes["company"]="";
+		$this->addressAttributes["phoneticCompany"]="";
+		$this->addressAttributes["companyPhone"]="";
+		$this->addressAttributes["email"]="";
+		$this->addressAttributes["email2"]="";
+		$this->addressAttributes["email3"]="";
+		$this->addressAttributes["fileAs"]="";
+		$this->addressAttributes["firstName"]="";
+		$this->addressAttributes["phoneticFirstName"]="";
+		$this->addressAttributes["lastName"]="";
+		$this->addressAttributes["phoneticLastName"]="";
+		$this->addressAttributes["fullName"]="";
+		$this->addressAttributes["phoneticFullName"]="";
+		$this->addressAttributes["homeCity"]="";
+		$this->addressAttributes["homeCountry"]="";
+		$this->addressAttributes["homeFax"]="";
+		$this->addressAttributes["homePhone"]="";
+		$this->addressAttributes["homePhone2"]="";
+		$this->addressAttributes["homePostalCode"]="";
+		$this->addressAttributes["homeState"]="";
+		$this->addressAttributes["homeStreet"]="";
+		$this->addressAttributes["homeURL"]="";
+		$this->addressAttributes["imAddress1"]="";
+		$this->addressAttributes["imAddress2"]="";
+		$this->addressAttributes["jobTitle"]="";
+		$this->addressAttributes["middleName"]="";
+		$this->addressAttributes["mobilePhone"]="";
+		$this->addressAttributes["mobilePhone2"]="";
+		$this->addressAttributes["namePrefix"]="";
+		$this->addressAttributes["nameSuffix"]="";
+		$this->addressAttributes["notes"]="";
+		$this->addressAttributes["otherCity"]="";
+		$this->addressAttributes["otherCountry"]="";
+		$this->addressAttributes["otherFax"]="";
+		$this->addressAttributes["otherPhone"]="";
+		$this->addressAttributes["otherPostalCode"]="";
+		$this->addressAttributes["otherState"]="";
+		$this->addressAttributes["otherStreet"]="";
+		$this->addressAttributes["otherURL"]="";
+		$this->addressAttributes["pager"]="";
+		$this->addressAttributes["workCity"]="";
+		$this->addressAttributes["workCountry"]="";
+		$this->addressAttributes["workFax"]="";
+		$this->addressAttributes["workPhone"]="";
+		$this->addressAttributes["workPhone2"]="";
+		$this->addressAttributes["workPostalCode"]="";
+		$this->addressAttributes["workState"]="";
+		$this->addressAttributes["workStreet"]="";
+		$this->addressAttributes["workURL"]="";
+		$this->addressAttributes["anniversary"]="";
+		$this->addressAttributes["assistantName"]="";
+		$this->addressAttributes["birthday"]="NULL";
+		$this->addressAttributes["children"]="";
+		$this->addressAttributes["customerId"]="";
+		$this->addressAttributes["department"]="";
+		$this->addressAttributes["gender"]="";
+		$this->addressAttributes["initials"]="";
+		$this->addressAttributes["office"]="";
+		$this->addressAttributes["managerName"]="";
+		$this->addressAttributes["nickname"]="";
+		$this->addressAttributes["profession"]="";
+		$this->addressAttributes["spouse"]="";
+	}
+
+	/**
+	 * Parses Zimbra contacts XML file
+	 * @param string $str Zimbra contacts XML
+	 * @param string $abookUrl Zimbra REST Url of currenlty processed contacts.xml
+	 * @param unknown $abookName Name of currently processed address book.
+	 */
+	public function parseContactsXml($str,$abookUrl,$abookName)
+	{
+		$this->setAbook($abookUrl,$abookName);
+		$this->updateCnt=0;
+		$this->processedCnt=0;
+		$zidArr=array();
+		$xml=new XMLReader();
+		$xml->xml($str);
+		while($xml->read())
+		{
+			if($xml->name=="items")
+			{
+				while($xml->read())
+				{
+					if($xml->name=="cn" && $xml->nodeType!=XMLReader::END_ELEMENT)
+					{
+						$this->processedCnt++;
+						$this->initAddressAttributes();
+						$fileAsStr="";
+						$change=time();
+						$rev=0;
+						$zid="-1";
+						// we are on cn node, try to get the attributes of cn
+						$tmp=$xml->getAttribute("fileAsStr");
+						if($tmp!=NULL)
+						{
+							$fileAsStr=$tmp;
+						}
+						$tmp=$xml->getAttribute("id");
+						if($tmp!=NULL)
+						{
+							$zid=$tmp;
+						}
+						$tmp=$xml->getAttribute("rev");
+						if($tmp!=NULL)
+						{
+							$rev=(int)$tmp;
+						}
+						$tmp=$xml->getAttribute("d");
+						if($tmp!=NULL)
+						{
+							// for some unknown reason the unix timstamp is in 1000/sec in xml
+							$change=(int)substr($tmp,0,-3);
+							//$change=date("Y-m-d H:i:s",$change);
+						}
+						// read address attributes
+						while($xml->read() && $xml->name!="cn")
+						{
+							if($xml->name=="a" && $xml->nodeType!=XMLReader::END_ELEMENT)
+							{
+								$attrKey=$xml->getAttribute("n");
+								$value=$xml->readString();
+								//Log::logMsg("Read address attribute:$attrKey $value\n",Log::DEBUG);
+								if($attrKey!="image")
+								{
+									$this->addressAttributes[$attrKey]=$value;
+								}
+							}
+						}
+						array_push($zidArr,$zid);
+						// safe entry
+						$this->updateCnt += $this->updateAddAddrEntry($zid,$fileAsStr,$rev,$change,$this->addressAttributes);
+					}
+				}
+			}
+		}
+		$savedZidArray=$this->getZidsFromAbook();
+		$this->delCnt=0;
+		if(count($savedZidArray)>0)
+		{
+			$deleteZidsArray=array_diff($savedZidArray,$zidArr);
+			foreach ($deleteZidsArray as $zidToDelete)
+			{
+				$this->delCnt+=$this->deleteAddrEntry($zidToDelete);
+				Log::logMsg($abookName.": Deleted address entry with zid:".$zidToDelete." from ".$abookName." since its no longer present in contacts XML\n",Log::DEBUG);
+			
+			}
+		}
+		Log::logMsg($abookName.": Processed ".$this->processedCnt.", updated ".$this->updateCnt.", deleted ".$this->delCnt." addresses\n",Log::WARN);
+	}
+}
+
+/**
+ * Implementation of abstact class zAddressImporter 
+ * Saves the Zimbra contacts in a database.
+ * Table 'zaddress' contains all address attributes for all address books.
+ * Table 'zabook' contains Name and Zimbra Rest Url of the zimbra address books
+ * @author c7
+ */
+class zAddressDBImporter extends zAddressImporter
+{
+	/* Connect to an ODBC database using driver invocation */
+	private $dsn = 'mysql:dbname=abook;host=localhost;charset=utf8';
+	private $dbUser = 'abook';
+	private $dbPassword = 'addrDB';
+	private $zabookId;
+	private $dbh = NULL;
+	private $insertQuery,$updateQuery,$findQuery,$findAbookQuery,$findZidsFromAbookQuery;
+	private $deleteQuery,$deleteZaddrFromAbookQuery,$deleteAbookQuery,$selectAbookQuery;
+	private $selectAbookByNameQuery, $deleteAbookByIdQuery;
+	private $sqlCreateTables="
+create table if not exists zabook
+(
+id int not null auto_increment,
+name varchar(255),
+url varchar(255),
+primary key(id),
+unique(url)
+);
+
+create table if not exists zaddress
+(
+id int not null auto_increment,
+abookId int,
+zid char(64) not null,
+fileAsStr varchar(512),
+lastchange timestamp default 0,
+rev int,
+assistantPhone varchar(255),
+callbackPhone varchar(255),
+carPhone varchar(255),
+company varchar(255),
+phoneticCompany varchar(255),
+companyPhone varchar(255),
+email varchar(255),
+email2 varchar(255),
+email3 varchar(255),
+fileAs int default 1,
+/*
+ * 1 = Last, First
+ * 2 = First Last
+ * 3 = Company
+ * 4 = Last, First (Company)
+ * 5 = First Last (Company)
+ * 6 = Company (Last, First)
+ * 7 = Company (First Last)
+ */
+firstName varchar(255),
+phoneticFirstName varchar(255),
+lastName varchar(255),
+phoneticLastName varchar(255),
+fullName varchar(255),
+phoneticFullName varchar(255),
+homeCity varchar(255),
+homeCountry varchar(255),
+homeFax varchar(255),
+homePhone varchar(255),
+homePhone2 varchar(255),
+homePostalCode varchar(255),
+homeState varchar(255),
+homeStreet varchar(255),
+homeURL varchar(255),
+imAddress1  varchar(255),
+imAddress2  varchar(255),
+jobTitle varchar(255),
+middleName varchar(255),
+mobilePhone varchar(255),
+mobilePhone2 varchar(255),
+namePrefix varchar(255),
+nameSuffix varchar(255),
+notes varchar(512),
+otherCity varchar(255),
+otherCountry varchar(255),
+otherFax varchar(255),
+otherPhone varchar(255),
+otherPostalCode varchar(255),
+otherState varchar(255),
+otherStreet varchar(255),
+otherURL varchar(255),
+pager varchar(255),
+workCity varchar(255),
+workCountry varchar(255),
+workFax varchar(255),
+workPhone varchar(255),
+workPhone2 varchar(255),
+workPostalCode varchar(255),
+workState varchar(255),
+workStreet varchar(255),
+workURL varchar(255),
+anniversary varchar(255),
+assistantName varchar(255),
+birthday date,
+children varchar(255),
+customerId varchar(255),
+department varchar(255),
+gender varchar(32),
+initials varchar(32),
+office varchar(255),
+managerName varchar(255),
+nickname varchar(128),
+profession varchar(255),
+spouse varchar(255),
+primary key (id),
+foreign key (abookId) references zabook (id),
+unique(zid),
+index(zid)
+);
+";
+
+	public function __construct($dsn,$dbUser,$dbPassword)
+	{
+		parent::__construct();
+		$this->dsn=$dsn;
+		$this->dbUser=$dbUser;
+		$this->dbPassword=$dbPassword;
+
+		try
+		{
+			$this->dbh = new PDO($dsn, $dbUser, $dbPassword);
+		}
+		catch (PDOException $e)
+		{
+			Log::logMsg('Connection failed: ' . $e->getMessage(),Log::ERR);
+			exit -1;
+		}
+		// Check if tables exists, otherwise create them
+		$createTables=false;
+		try
+		{
+			$res=$this->dbh->query("select 1 from zaddress limit 1;");
+			if(!$res)
+			{
+				$createTables=true;
+			}
+		}
+		catch (PDOException $e)
+		{
+			$createTables=true;
+		}
+		try
+		{
+			if($createTables)
+			{
+				// tables do not exist, create them.
+				if ($this->dbh->getAttribute(PDO::ATTR_DRIVER_NAME) != 'sqlite') 
+				{
+					$this->dbh->exec("SET NAMES 'utf8';");
+				}
+				$this->dbh->exec($this->sqlCreateTables);
+				Log::logMsg("Created tables zaddress,zabook\n",Log::WARN);
+			}
+			$this->insertQuery=$this->buildInsertQuery();
+			$this->updateQuery=$this->buildUpdateQuery();
+			$this->findQuery=$this->dbh->prepare("SELECT `id`,`lastchange`,`rev` FROM `zaddress` where `zid` = :zid");
+			$this->findAbookQuery=$this->dbh->prepare("SELECT `id`,`name` from `zabook` where `url` = :url");
+			$this->findZidsFromAbookQuery=$this->dbh->prepare("SELECT `zid` FROM `zaddress`,`zabook` where `zabook.url` = :abookUrl");
+			$this->deleteQuery=$this->dbh->prepare("DELETE FROM `zaddress` where `zid` = :zid");
+			$this->deleteZaddrFromAbookQuery=$this->dbh->prepare("DELETE FROM `zaddress` where `abookId` = :abookId");
+			$this->deleteAbookQuery=$this->dbh->prepare("DELETE FROM `zabook` where `id` = :id");
+			$this->selectAbookQuery=$this->dbh->prepare("SELECT `name` FROM `zabook`");
+			$this->selectAbookByNameQuery=$this->dbh->prepare("SELECT `name`,`id` FROM `zabook` where`name` = :name");
+			$this->deleteAbookByIdQuery=$this->dbh->prepare("DELETE FROM `zabook` where `id` = :id");
+		}
+		catch (PDOException $e)
+		{
+			Log::logMsg('SQL error: ' . $e->getMessage(),Log::ERR);
+			exit -1;
+		}
+	}
+	
+	private function buildInsertQuery()
+	{
+		// build insert statment
+		$wildcarts="";
+		foreach(array_keys($this->addressAttributes) as $k)
+		{
+			$wildcarts=$wildcarts.",?";
+		}
+		$sqlInsert="INSERT INTO `zaddress` (`zid`,`abookId`,`fileAsStr`,`rev`,`lastchange`,`".implode("`,`",array_keys($this->addressAttributes))."`) VALUES(?,?,?,?,?".$wildcarts.")";
+		return $this->dbh->prepare($sqlInsert);
+	}
+
+	private function buildUpdateQuery()
+	{
+		// build update by id query
+		$wildcarts="";
+		foreach(array_keys($this->addressAttributes) as $k)
+		{
+			$wildcarts=$wildcarts.",?";
+		}
+		$sqlUpdate="UPDATE `zaddress` SET `fileAsStr`=?,`rev`=?,`lastchange`=?,`".implode("`=?,`",array_keys($this->addressAttributes))."`=? WHERE `id` = ?";
+		return $this->dbh->prepare($sqlUpdate);
+	}
+
+	protected function setAbook($abookUrl,$abookName)
+	{
+		try
+		{
+			$this->findAbookQuery->bindParam(':url', $abookUrl, PDO::PARAM_STR);
+			$res=$this->findAbookQuery->execute();
+			if($res)
+			{
+				$abookArr=$this->findAbookQuery->fetch(PDO::FETCH_ASSOC);
+				if($abookArr)
+				{
+					$this->zabookId=$abookArr['id'];
+					if($abookName!=$abookArr['name'])
+					{
+						// update
+						$this->dbh->exec("UPDATE `zabook` SET `name` = '".$abookName."' WHERE `id` ='".$this->zabookId."';");
+						Log::logMsg("Updated ".$abookArr['name']."->".$abookName."\n",Log::WARN);
+					}
+				}
+				else
+				{
+					Log::logMsg(print_r($this->dbh->errorInfo(),true),Log::ERR);
+					// insert
+					$res=$this->dbh->exec("INSERT INTO `zabook` SET `name` = '".$abookName."' , `url` = '".$abookUrl."' ;");
+					if($res)
+					{
+						Log::logMsg("New address book ".$abookName."\n",Log::WARN);
+						$this->findAbookQuery->execute();
+						$abookArr=$this->findQuery->fetch(PDO::FETCH_ASSOC);
+						$this->zabookId=$abookArr['id'];
+					}
+					else
+					{
+						Log::logMsg("Cannot create address book ".$abookName."\n",Log::ERR);
+						Log::logMsg(print_r($this->dbh->errorInfo(),true),Log::ERR);
+						exit -1;
+					}
+				}
+			}
+			else 
+			{
+				Log::logMsg(print_r($this->dbh->errorInfo(),true),Log::ERR);
+			}
+		}
+		catch (PDOException $e)
+		{
+			Log::logMsg('Query failed'.$e->getMessage()."\n",Log::ERR);
+			exit -1;
+		}
+	}
+	
+	protected function updateAddAddrEntry($zid, $fileAsStr, $rev, $lastchange,$addressAttributes)
+	{
+		try
+		{
+			$updated=0;
+			// check if we have already an address entry
+			$this->findQuery->bindParam(':zid', $zid, PDO::PARAM_STR);
+			$res=$this->findQuery->execute();
+			$insert=false;
+			if($res)
+			{
+				$idArr=$this->findQuery->fetch(PDO::FETCH_ASSOC);
+				$id=$idArr['id'];
+				$dbLastChange=$idArr['lastchange'];
+				$dbRev=$idArr['rev'];
+				// found entry, update if newer
+				if($id)
+				{
+					if($rev>$dbRev)
+					{
+						$values=array_merge(array($fileAsStr,$rev,$lastchange),array_values($addressAttributes),array($id));
+						if($this->updateQuery->execute($values))
+						{
+							$updated=1;
+							Log::logMsg("Updated $fileAsStr\n");
+							Log::logMsg(print_r($this->updateQuery->errorInfo(),true),Log::ERR);
+						}
+						else
+						{
+							$updated=0;
+							Log::logMsg("Failed to update $fileAsStr!\n");
+							Log::logMsg(print_r($this->updateQuery->errorInfo(),true),Log::ERR);
+						}
+					}
+					else 
+					{
+						$updated=0;
+						Log::logMsg("No change for $fileAsStr.\n",Log::DEBUG);
+					}
+				}
+				else
+				{
+					$insert=true;
+				}
+			}
+			else
+			{
+				$insert=true;
+			}
+			if ($insert)
+			{
+				$changeDate=date("Y-m-d H:i:s",$lastchange);
+				// insert new entry
+				$values=array_merge(array($zid,$this->zabookId,$fileAsStr,$rev,$changeDate),array_values($addressAttributes));
+				if($this->insertQuery->execute($values))
+				{
+					$updated=1;
+					Log::logMsg("Inserted $fileAsStr\n");
+				}
+				else
+				{
+					$updated=0;
+					Log::logMsg("Failed to insert $fileAsStr!\n",Log::WARN);
+					Log::logMsg(print_r($this->insertQuery->errorInfo(),true),Log::ERR);
+				}
+			}
+		}
+		catch(PDOException $e)
+		{
+			Log::logMsg('Query failed' . $e->getMessage(),Log::ERR);
+		}
+		return $updated;
+	}
+	
+	// return all contact's zids that are saved in database or ldap for current abook (used to find which one are to delete)
+	protected function getZidsFromAbook()
+	{
+		$this->findZidsFromAbookQuery->bindParam(':abookUrl', $abookUrl, PDO::PARAM_STR);
+		$res=$this->findZidsFromAbookQuery->execute();
+		if($res)
+		{
+			$zidsArr=$this->findQuery->fetchAll(PDO::FETCH_COLUMN | PDO::FETCH_UNIQUE);
+		}
+	}
+	// delete entry (since its no longer in XML file)
+	protected function deleteAddrEntry($zid)
+	{
+		$this->deleteQuery->bindParam(':zid', $zid, PDO::PARAM_STR);
+		$res=$this->deleteQuery->execute();
+		if($res)
+		{
+			Log::logMsg("Deleted entry with zid:".$zid."\n",Log::INFO);
+			return 1;
+		}
+		else
+		{
+			Log::logMsg("Cannot deleted entry with zid:".$zid."\n",Log::INFO);
+			return 0;
+		}
+	}
+	
+	public function getAbookList()
+	{
+		$abooks=array();
+		$res=$this->selectAbookQuery->execute();
+		if($res)
+		{
+			$abooks=$this->selectAbookQuery->fetchAll(PDO::FETCH_COLUMN);
+		}
+		return $abooks;
+	}
+	
+	public function deleteAbook($abookName)
+	{
+		// get id from abook
+		$this->selectAbookByNameQuery->bindParam(':name', $abookName, PDO::PARAM_STR);
+		$res=$this->selectAbookByNameQuery->execute();
+		if($res)
+		{
+			$abookArr=$this->selectAbookByNameQuery->fetch(PDO::FETCH_ASSOC);
+			if(count($abookArr)!=1)
+			{
+				$zabookId=$abookArr['id'];
+				// delete zaddress by abookId
+				$this->deleteZaddrFromAbookQuery->bindParam(':abookId', $zabookId, PDO::PARAM_STR);
+				$resDel=$this->deleteZaddrFromAbookQuery->execute();
+				if($resDel)
+				{
+					Log::logMsg("Deleted addresses of address book '".$abookName."'\n",Log::INFO);
+				}
+				// delete abook by id
+				$this->deleteAbookByIdQuery->bindParam(':id', $zabookId, PDO::PARAM_STR);
+				$resDel=$this->deleteAbookByIdQuery->execute();
+				if($resDel)
+				{
+					Log::logMsg("Deleted addresses book '".$abookName."'\n",Log::INFO);
+					return 1;
+				}
+			}
+			else
+			{
+				Log::logMsg("Cannot delete address book '".$abookName."', not found!\n",Log::WARN);
+				return 0;
+			}
+		}
+		else
+		{
+			Log::logMsg("Cannot delete address book ".$abookName.", error while searching in DB!\n",Log::WARN);
+			return 0;
+		}
+	}
+}
+
+/**
+ * Implementation of abstact class zAddressImporter
+ * Saves the Zimbra contacts in a ldap directory.
+ * Each address book is added to a separate ou below base dn.
+ * Example base dn: ou=zabooks,dc=example,dc=com
+ * 	Address book enties of address book with name "myZimbraAbook" are added below
+ * 	ou=myZimbraAbook,ou=zabooks,dc=example,dc=com
+ * 	Address book enties of address book "myZimbraAbook" are added below
+ * 	ou=myOtherZimbraAbook,ou=zabooks,dc=example,dc=com
+ * @author c7
+ */
+class zAddressLdapImporter extends zAddressImporter
+{
+	private $server = 'localhost';
+	private $baseDn;
+	private $bindDn;
+	private $bindPass;
+	private $objectClass;
+	private $attributeMap;
+	private $curAbookDn;
+	
+	public function __construct($server,$baseDn,$bindDn,$bindPass,$objectClass,$attributeMap)
+	{
+		parent::__construct();
+		$this->server=$server;
+		$this->baseDn=$baseDn;
+		$this->bindDn=$bindDn;
+		$this->attributeMap=$attributeMap;
+		$this->objectClass=$objectClass;
+		
+		$this->ldapConn = NULL;
+		
+		$this->ldapConn=ldap_connect($this->server);
+		if($this->ldapConn)
+		{
+			ldap_set_option($this->ldapConn, LDAP_OPT_PROTOCOL_VERSION, 3);
+			$res=ldap_bind($this->ldapConn,$this->bindDn,$bindPass);
+			if($res)
+			{
+				Log::logMsg("Ldap bind to ".$this->server." successful.\n",Log::DEBUG);
+			}
+			else
+			{
+				Log::logMsg("Cannot bind to ".$this->server." using ".$this->bindDn."\n",Log::ERR);
+				ldap_close($this->ldapConn);
+				exit -1;
+			}
+		}
+	}
+	
+	/**
+	 * function ldap_escape
+	 * @author Chris Wright
+	 * @version 2.0
+	 * @param string $subject The subject string
+	 * @param bool $dn Treat subject as a DN if TRUE
+	 * @param string|array $ignore Set of characters to leave untouched
+	 * @return string The escaped string
+	 */
+	protected function ldap_escape ($subject, $dn = FALSE, $ignore = NULL)
+	{
+	
+		// The base array of characters to escape
+		// Flip to keys for easy use of unset()
+		$search = array_flip($dn ? array('\\', ',', '=', '+', '<', '>', ';', '"', '#') : array('\\', '*', '(', ')', "\x00"));
+	
+		// Process characters to ignore
+		if (is_array($ignore))
+		{
+			$ignore = array_values($ignore);
+		}
+		for ($char = 0; isset($ignore[$char]); $char++)
+		{
+			unset($search[$ignore[$char]]);
+		}
+	
+		// Flip $search back to values and build $replace array
+		$search = array_keys($search);
+		$replace = array();
+		foreach ($search as $char)
+		{
+			$replace[] = sprintf('\\%02x', ord($char));
+		}
+	
+		// Do the main replacement
+		$result = str_replace($search, $replace, $subject);
+	
+		// Encode leading/trailing spaces in DN values
+		if ($dn) {
+			if ($result[0] == ' ')
+			{
+				$result = '\\20'.substr($result, 1);
+			}
+			if ($result[strlen($result) - 1] == ' ') 
+			{
+				$result = substr($result, 0, -1).'\\20';
+			}
+		}
+		return $result;
+	}
+	
+	protected function setAbook($abookUrl,$abookName)
+	{
+		$this->curAbookDn="ou=".$abookName.",".$this->baseDn;
+		// do ldap search first
+		$filter="(ou=".$abookName.")";
+		$res=ldap_search($this->ldapConn, $this->baseDn, $filter,array("ou"));
+		$add=false;
+		if($res)
+		{
+			$entries = ldap_get_entries($this->ldapConn, $res);
+			if ($entries["count"]!=1)
+			{
+				$add=true;
+			}
+		}
+		else
+		{
+			$add=true;
+			Log::logMsg("Error searching for abook DN ".$this->curAbookDn."\n",Log::ERR);
+		}
+		if($add)
+		{
+			// add abook ou
+			$ldapEntry['objectClass']="organizationalUnit";
+			$res=ldap_add($this->ldapConn,$this->curAbookDn,$ldapEntry);
+			if($res)
+			{
+				Log::logMsg("Ldap added abook DN ".$this->curAbookDn." successfully.\n",Log::DEBUG);
+			}
+			else
+			{
+				Log::logMsg("Cannot add abook DN ".$this->curAbookDn."\n",Log::ERR);
+			}
+		}
+	}
+	
+	protected function updateAddAddrEntry($zid, $fileAsStr, $rev, $lastchange,$addressAttributes)
+	{
+		//search if existing
+		// do ldap search first
+		$filter="(uid=$zid)";
+		$searchRes=ldap_search($this->ldapConn, $this->curAbookDn, $filter,array("createTimestamp","uid"));
+		$update=true;
+		if($searchRes)
+		{
+			$entry = ldap_first_entry($this->ldapConn, $searchRes);
+			if($entry)
+			{
+				// have already an entry
+				$attrs = ldap_get_attributes($this->ldapConn,$entry);
+				$currDn=ldap_get_dn($this->ldapConn,$entry);
+				$curUid=$attrs['uid'][0];
+				// parse ldap ASN1 time
+				$createTimestamp=str_replace ("Z","",$attrs['createTimestamp'][0]);
+				$ldapTs = DateTime::createFromFormat('YmdHis',$createTimestamp,new DateTimeZone('UTC'));
+				$ldapTs->setTimeZone(new DateTimeZone('UTC'));
+				// check if XML is newer that LDAP createTimestamp
+				if($lastchange>$ldapTs->getTimestamp())
+				{
+					Log::logMsg("XML-TS:".date("Y-m-d H:i.s",$lastchange)." LDAP-TS:".date("Y-m-d H:i.s",$ldapTs->getTimestamp())."\n",Log::DEBUG);
+					$res=ldap_delete($this->ldapConn,$currDn);
+					if($res)
+					{
+						Log::logMsg("Deleting entry ".$currDn." since there is a newer one\n",Log::INFO);
+						$update=true;
+					}
+					else
+					{
+						Log::logMsg("Cannot delete entry ".$currDn."\n",Log::ERR);
+						$update=false;
+					}
+				}
+				else
+				{
+					$update=false;
+					Log::logMsg("No update for ".$currDn."\n",Log::DEBUG);
+				}
+			}
+			else
+			{
+				// not existing entry, add one
+				$update=true;
+			}
+		}
+		else
+		{
+			Log::logMsg("Unable to search entry in current abook ".$this->curAbookDn."\n",Log::ERR);
+		}
+		if($update)
+		{
+			// add entry
+			$ldapEntry=array();
+			$ldapEntry['objectClass']=$this->objectClass;
+			$ldapEntry['uid']=$zid;
+			foreach(array_keys($addressAttributes) as $zAttrName)
+			{
+				// find ldap attribute map
+				$ldapAttrName=$this->attributeMap[$zAttrName];
+				if($ldapAttrName!="" && $addressAttributes[$zAttrName]!="")
+				{
+					// handle multi attribute
+					$multiAttrIdx=0;
+					while(isset($ldapEntry[$ldapAttrName][$multiAttrIdx]))
+					{
+						$multiAttrIdx++;
+					}
+					$ldapEntry[$ldapAttrName][$multiAttrIdx]=$addressAttributes[$zAttrName];
+				}
+				else
+				{
+					continue;
+				}
+			}
+			// check for mandatory 'sn' attribute
+			if(!array_key_exists('sn',$ldapEntry))
+			{
+				if($fileAsStr!="")
+				{
+					$ldapEntry['sn']=$fileAsStr;
+				}
+				else
+				{
+					$ldapEntry['sn']="-";
+				}
+			}
+			// create a 'cn'
+			if($fileAsStr!="")
+			{
+				$entryDn="cn=".$this->ldap_escape($fileAsStr,true).",".$this->curAbookDn;
+			}
+			else
+			{
+				$entryDn="cn=".$this->ldap_escape($addressAttributes['fullName'],true).",".$this->curAbookDn;
+			}
+			$res=ldap_add($this->ldapConn,$entryDn,$ldapEntry);
+			if($res)
+			{
+				Log::logMsg("Ldap add entry ".$entryDn." successful.\n",Log::INFO);
+				return 1;
+			}
+			else
+			{
+				Log::logMsg("Cannot add entry ".$entryDn."\n",Log::ERR);
+				Log::logMsg(print_r($ldapEntry,true),Log::DEBUG);
+				return 0;
+			}
+		}
+	}
+	
+	// return all contact's zids that are saved in database or ldap for current abook (used to find which one are to delete)
+	protected function getZidsFromAbook()
+	{
+		// do ldap search first
+		$res=ldap_search($this->ldapConn,$this->curAbookDn, "uid=*",array("uid"));
+		$zidArr=array();
+		if($res)
+		{
+			$entry = ldap_first_entry($this->ldapConn, $res);
+			while($entry)
+			{
+				$vals=ldap_get_values($this->ldapConn,$entry,"uid");
+				if($vals)
+				{
+					array_push($zidArr,$vals[0]);
+				}
+				$entry = ldap_next_entry($this->ldapConn, $entry);
+			}
+		}
+		else
+		{
+			Log::logMsg("Error searching uids in abook DN ".$this->curAbookDn."\n",Log::ERR);
+		}
+		return $zidArr;
+	
+	}
+	// delete entry (since its no longer in XML file)
+	protected function deleteAddrEntry($zid)
+	{
+		$del=0;
+		// do ldap search first
+		$res=ldap_search($this->ldapConn,$this->curAbookDn, "uid=".$zid,array("uid"));
+		if($res)
+		{
+			$entry=ldap_first_entry($this->ldapConn,$res);
+			$dn=ldap_get_dn($this->ldapConn,$entry);
+			$delRes=ldap_delete($this->ldapConn,ldap_get_dn($this->ldapConn,$entry));
+			if($delRes)
+			{
+				Log::logMsg("Deleted ".$dn."\n",Log::INFO);
+				$del=1;
+			}
+			else
+			{
+				Log::logMsg("Cannot delete entry with uid:".$zid."\n",Log::ERR);
+			}
+		}
+		else
+		{
+			Log::logMsg("Entry with uid:".$zid." not found.\n",Log::WARN);
+		}
+		return $del;
+	}
+	
+	public function getAbookList()
+	{
+		// do ldap search of abooks
+		$filter="(ou=*)";
+		$res=ldap_search($this->ldapConn, $this->baseDn, $filter,array("ou"));
+		$abooks=array();
+		if($res)
+		{
+			$entries = ldap_get_entries($this->ldapConn, $res);
+			foreach($entries as $entry)
+			{
+				if($entry['dn']==$this->baseDn || !is_array($entry))
+				{
+					continue;
+				}
+				array_push($abooks,$entry['ou'][0]);
+			}
+		}
+		return $abooks;
+	}
+	
+	public function deleteAbook($abookName)
+	{
+		// do ldap search first
+		$filter="(ou=".$abookName.")";
+		$res=ldap_search($this->ldapConn, $this->baseDn, $filter,array("ou"));
+		if($res)
+		{
+			$entries = ldap_get_entries($this->ldapConn, $res);
+			if ($entries["count"]!=1)
+			{
+				Log::logMsg("Error deleting abook '".$abookName."' not found!\n",Log::ERR);
+			}
+			else
+			{
+				// delete all sub entries
+				$subRes=ldap_list($this->ldapConn,"ou=".$abookName.",".$this->baseDn,"ObjectClass=*",array(""));
+				$entries = ldap_get_entries($this->ldapConn,$subRes);
+				$delCnt=0;
+				for($i=0;$i<$entries['count'];++$i)
+				{
+					$delRes=ldap_delete($this->ldapConn,$entries[$i]['dn']);
+					if($delRes)
+					{
+						$delCnt++;
+					}
+				}
+				if($delCnt!=$entries['count'])
+				{
+					Log::logMsg("Error deleting address entries from abook '".$abookName."'. ".$delCnt." of ".$entries['count']." deleted\n",Log::ERR);
+				}
+				else
+				{
+					if(!ldap_delete($this->ldapConn,"ou=".$abookName.",".$this->baseDn))
+					{
+						Log::logMsg("Error deleting ou abook '".$abookName."'.\n",Log::ERR);
+					}
+				}
+			}
+		}
+		else
+		{
+			Log::logMsg("Error searching for abook DN ".$this->curAbookDn."\n",Log::ERR);
+		}
+		return $delCnt;
+	}
+}
+
+/**
+ * Simple wrapper class for curl calls to download XML export file over https
+ * @author c7
+ */
+class Downloader
+{
+	private $zUrl;
+	private $user;
+	private $pass;
+	
+	public function get($zUrl,$zUser,$zPass)
+	{
+		$curl = curl_init();
+		curl_setopt($curl, CURLOPT_URL, $zUrl);
+		curl_setopt($curl, CURLOPT_HEADER, 0);
+		curl_setopt($curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC|CURLAUTH_DIGEST) ;
+		curl_setopt($curl, CURLOPT_USERPWD, $zUser.":".$zPass);
+		curl_setopt($curl, CURLOPT_SSLVERSION,3);
+		curl_setopt($curl, CURLOPT_RETURNTRANSFER,TRUE);
+		curl_setopt($curl, CURLOPT_FAILONERROR,TRUE);
+		$data=curl_exec($curl);
+		if(curl_errno($curl))
+		{
+			Log::LogMsg("cURL Error:".curl_error($curl)."\n",Log::ERR);
+			return "";
+		}
+		else
+		{
+			return $data;
+		}
+		
+	}
+}
+
+/**
+ * Simple logger class that defines 4 Log levels,
+ * provides static access functions
+ * @author c7
+ */
+class Log
+{
+	 const ERR = 1;
+	 const WARN = 2;
+	 const INFO = 3;
+	 const DEBUG = 4;
+	
+	static $curLevel=self::WARN;
+	
+	/**
+	 * Function to log. Only messaes that are greater or equal to current set level are printed,
+	 * where Log::ERR<Log::WARN<Log::INFO<Log::DEBUG
+	 * @param String $msg The message to log
+	 * @param int $level The Log lebel to use for msg.
+	 */
+	public static function logMsg($msg,$level=Log::INFO)
+	{
+		if(self::$curLevel>=$level)
+		{
+			echo($msg);
+		}
+	}
+	
+	/**
+	 * Sets loglevel to use for outputs. Only messaes that are greater or equal to current set level are printed,
+	 * where Log::ERR<Log::WARN<Log::INFO<Log::DEBUG
+	 * @param int $level
+	 */
+	public static function setLevel($level)
+	{
+		if($level>0 && $level<=self::DEBUG)
+		{
+			self::$curLevel=$level;
+		}
+		else
+		{
+			echo("Invalid Log level ".$level);
+		}
+	}
+}
+
+
+/**
+ * Import zimbra address book into db or ldap according to config 
+ */
+function importAbooks($cfg, $zDbIm, $zLdapIm)
+{
+	// handle all import sections
+	$zdl = new Downloader();
+	foreach (array_keys($cfg) as $key)
+	{
+		if(substr($key,0,6)=="import")
+		{
+			Log::LogMsg("Processing ".$key."\n",Log::INFO);
+			$xmlStr=$zdl->get($cfg[$key]['url'],$cfg[$key]['user'],$cfg[$key]['pass']);
+			if($xmlStr!="")
+			{
+				foreach (explode(",",$cfg[$key]['target']) as $target)
+				{
+					if($target=="db")
+					{
+						if($zDbIm)
+						{
+							Log::LogMsg("DB import of ".$cfg[$key]['name']."\n",Log::INFO);
+							$zDbIm->parseContactsXml($xmlStr,$cfg[$key]['url'],$cfg[$key]['name']);
+						}
+						else
+						{
+							Log::LogMsg("Cannot import to DB, [db-config] section not found in ".$iniFile."\n",Log::ERR);
+						}
+					}
+					else if($target=="ldap")
+					{
+						if($zLdapIm)
+						{
+							Log::LogMsg("LDAP import of ".$cfg[$key]['name']."\n",Log::INFO);
+							$zLdapIm->parseContactsXml($xmlStr,$cfg[$key]['url'],$cfg[$key]['name']);
+						}
+						else
+						{
+							Log::LogMsg("Cannot import to LDAP, [ldap-config] section not found in ".$iniFile."\n",Log::ERR);
+						}
+					}
+				}
+			}
+			else
+			{
+				Log::LogMsg("Cannot download XML for ".$key.". Check url,user or pass\n");
+			}
+		}
+	}
+}
+
+
+/**
+ * Parse args and config.ini
+ */
+function main()
+{
+	$iniFile="config.ini";
+	$longopts=(array("help","version","config:","rm-ldap-ab:","rm-db-ab:","ls-ab"));
+	$optArray=getopt("hv::c:",$longopts);
+	
+	
+	// help
+	if(array_key_exists('help',$optArray) || array_key_exists('h',$optArray))
+	{
+		printf("\tNo parameter: Reads config ini and imports address books according to config.ini\n");
+		printf("\t%-33s%s\n","--help|-h","Show this help text");
+		printf("\t%-33s%s\n","--version","Shows version and exits");
+		printf("\t%-33s%s\n","--config|-c <config.ini>","Config ini file to use. Defaults to 'config.ini'");
+		printf("\t%-33s%s\n","--ls-ab","List all address books that exists in DB/LDAP");
+		printf("\t%-33s%s\n","--rm-db-ab <address book name>","Deletes given address book and all it's contacts from DB");
+		printf("\t%-33s%s\n","--rm-ldap-ab <address book name>","Deletes given address book and all it's contacts from LDAP");
+		printf("\t%-33s%s\n","-v|-vv|-vvv","Verbose, more verbose, debug");
+		exit(0);
+	}
+	
+	// verbose flags
+	if(array_key_exists('v',$optArray))
+	{
+		Log::setLevel(Log::WARN);
+		if($optArray['v']=='v')
+		{
+			Log::setLevel(Log::INFO);
+		}
+		else if($optArray['v']=='vv')
+		{
+			Log::setLevel(Log::DEBUG);
+		}
+	}
+	else
+	{
+		Log::setLevel(Log::ERR);
+	}
+	
+	// config opt
+	if(array_key_exists('config',$optArray))
+	{
+		$iniFile=$optArray['config'];
+	}
+	if(array_key_exists('c',$optArray))
+	{
+		$iniFile=$optArray['c'];
+	}
+	if(file_exists($iniFile))
+	{
+		Log::LogMsg("Using config '".$iniFile."'\n",Log::INFO);
+	}
+	else
+	{
+		Log::LogMsg("Cannot find config '".$iniFile."'\n",Log::ERR);
+		exit(-1);
+	}
+	$cfg = parse_ini_file($iniFile, TRUE);
+	
+	if($cfg['db-config'])
+	{
+		$zDbIm = new zAddressDBImporter($cfg['db-config']['dsn'],$cfg['db-config']['user'],$cfg['db-config']['pass']);
+	}
+	
+	if($cfg['ldap-config'])
+	{
+		$zLdapIm= new zAddressLdapImporter($cfg['ldap-config']['server'],
+				$cfg['ldap-config']['baseDn'],
+				$cfg['ldap-config']['bindDn'],
+				$cfg['ldap-config']['bindPw'],
+				$cfg['ldap-config']['objectClass'],
+				$cfg['ldap-attributeMapping']);
+	}
+	
+	if(array_key_exists('rm-db-ab',$optArray) && $zDbIm)
+	{
+		$zDbIm->deleteAbook($optArray['rm-db-ab']);
+		exit(0);
+	}
+	
+	if(array_key_exists('rm-ldap-ab',$optArray) && $zLdapIm)
+	{
+		$zLdapIm->deleteAbook($optArray['rm-ldap-ab']);
+		exit(0);
+	}
+	
+	if(array_key_exists('ls-ab',$optArray))
+	{
+		if($zDbIm)
+		{
+			echo("Address books in database\n");
+			echo("-------------------------\n");
+			foreach ($zDbIm->getAbookList() as $abookName)
+			{
+				echo($abookName."\n");
+			}
+			echo("\n");
+		}
+		if($zLdapIm)
+		{
+			echo("Address books in ldap\n");
+			echo("---------------------\n");
+			foreach ($zLdapIm->getAbookList() as $abookName)
+			{
+				echo($abookName."\n");
+			}
+			echo("\n");
+		}
+		exit(0);
+	}
+	importAbooks($cfg,$zDbIm,$zLdapIm);
+}
+
+global $argv;
+main()
+?>
