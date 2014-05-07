@@ -1204,7 +1204,12 @@ function main()
 	{
 		Log::setLevel(Log::ERR);
 	}
-	
+	// version	
+	if(array_key_exists('version',$optArray))
+	{
+		echo("zimslabim ".$GLOBALS['version']."\n");
+		exit(0);
+	}
 	// config opt
 	if(array_key_exists('config',$optArray))
 	{
