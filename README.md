@@ -1,4 +1,4 @@
-# DEPRICTED and NO MAINTAINED!
+# DEPRECATED and NOT MAINTAINED!
 
 zimslabim
 =========
